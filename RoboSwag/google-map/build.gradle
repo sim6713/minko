@@ -1,0 +1,15 @@
+apply from: "../android-configs/lib-config.gradle"
+
+dependencies {
+    api project(":base-map")
+
+    implementation "com.google.android.gms:play-services-maps"
+
+    constraints {
+        implementation("com.google.android.gms:play-services-maps") {
+            version {
+                require '17.0.0'
+            }
+        }
+    }
+}

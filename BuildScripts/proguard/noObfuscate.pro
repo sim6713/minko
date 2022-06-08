@@ -1,0 +1,3 @@
+-dontobfuscate
+
+-include common.pro

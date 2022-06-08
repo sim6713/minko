@@ -1,0 +1,39 @@
+{
+  "project_info": {
+    "project_number": "332400840760",
+    "project_id": "ru-minko-mobile",
+    "storage_bucket": "ru-minko-mobile.appspot.com"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:332400840760:android:61e95b3c4be1e62fb656cd",
+        "android_client_info": {
+          "package_name": "ru.minko.mobile"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "332400840760-irr5g0bse9in98mil6l21457m32dtk08.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCEm5pEEXbocVyl0UG7cLopv3GYDZdON64"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "332400840760-irr5g0bse9in98mil6l21457m32dtk08.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

@@ -1,0 +1,13 @@
+apply from: "../android-configs/lib-config.gradle"
+
+dependencies {
+    implementation "androidx.recyclerview:recyclerview"
+
+    constraints {
+        implementation("androidx.recyclerview:recyclerview") {
+            version {
+                require '1.0.0'
+            }
+        }
+    }
+}

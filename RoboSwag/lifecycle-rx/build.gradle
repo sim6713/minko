@@ -1,0 +1,40 @@
+apply from: "../android-configs/lib-config.gradle"
+
+dependencies {
+    api project(":utils")
+    api project(":logging")
+    api project(":lifecycle")
+
+    implementation "androidx.appcompat:appcompat"
+
+    implementation "androidx.lifecycle:lifecycle-extensions"
+
+    implementation "io.reactivex.rxjava2:rxjava"
+    implementation "io.reactivex.rxjava2:rxandroid"
+
+    constraints {
+        implementation("androidx.appcompat:appcompat") {
+            version {
+                require '1.0.0'
+            }
+        }
+
+        implementation("androidx.lifecycle:lifecycle-extensions") {
+            version {
+                require '2.1.0'
+            }
+        }
+
+        implementation("io.reactivex.rxjava2:rxjava") {
+            version {
+                require '2.2.6'
+            }
+        }
+
+        implementation("io.reactivex.rxjava2:rxandroid") {
+            version {
+                require '2.0.0'
+            }
+        }
+    }
+}

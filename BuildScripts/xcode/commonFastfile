@@ -1,0 +1,419 @@
+$appName = File.basename(Dir['../*.xcworkspace'].first, '.*')
+
+require_relative 'fastlane/touchlane/lib/touchlane'
+
+private_lane :installDependencies do |options|
+  podsReposPath = File.expand_path "~/.cocoapods/repos/master/"
+  lockFilePath = "#{podsReposPath}/.git/index.lock"
+
+  # check if .lock file exists in pod repos - then remove all master repo
+  if File.exists? lockFilePath
+    sh("rm -rf #{podsReposPath}")
+  end
+
+  if File.exists? "../Gemfile"
+    bundle_install(path: "../.gem")
+  end
+
+  cocoapods(
+    repo_update: true
+  )
+
+  if File.exists? "../Cartfile"
+    use_rome = File.exists? "../Romefile"
+
+    swift_version = sh("xcrun swift --version | head -1 | sed 's/.*\\(\(.*\)\\).*/\\1/' | tr -d \"()\" | tr \" \" \"-\"").chop
+    rome_path = "Pods/Rome/rome"
+    rome_options = "--platform iOS --cache-prefix #{swift_version} --romefile Romefile"
+
+    carthage_install = lambda do
+      if use_rome
+        sh("cd .. && #{rome_path} download #{rome_options}")
+      end
+
+      carthage(command: "bootstrap", platform: "iOS", cache_builds: true)
+
+      if use_rome
+        sh("cd .. && #{rome_path} list --missing #{rome_options} | awk '{print $1}' | xargs -I framework_name #{rome_path} upload framework_name #{rome_options}")
+      end
+    end
+
+    begin
+      carthage_install.call
+    rescue
+      # workaround for https://github.com/Carthage/Carthage/issues/2298
+      sh("rm -rf ~/Library/Caches/org.carthage.CarthageKit")
+      carthage_install.call
+    end
+  end
+end
+
+private_lane :uploadToFirebase do |options|
+  releaseNotesFile = "release-notes.txt"
+  sh("touch ../#{releaseNotesFile}")
+
+  sh("yarn install")
+
+  app_target_folder_name = options[:appName] || $appName
+  configuration_type = Touchlane::ConfigurationType.from_type(options[:type])
+
+  gsp_plist_path = get_google_services_plist_path(app_target_folder_name, configuration_type)
+
+  google_app_id = get_info_plist_value(path: gsp_plist_path, key: "GOOGLE_APP_ID")
+
+  firebase_app_distribution(
+      app: google_app_id,
+      ipa_path: options[:ipa_path],
+      groups: "touch-instinct",
+      release_notes_file: releaseNotesFile,
+      firebase_cli_path: File.expand_path("../node_modules/firebase-tools/lib/bin/firebase.js")
+  )
+
+  upload_symbols_to_crashlytics(
+    gsp_path: get_google_services_plist_path(app_target_folder_name, configuration_type)
+  )
+end
+
+private_lane :uploadToAppStore do |options|
+  upload_to_app_store(
+    username: options[:username] || options[:apple_id],
+    ipa: options[:ipa_path],
+    force: true, # skip metainfo prompt
+    skip_metadata: true,
+    team_id: options[:itc_team_id],
+    dev_portal_team_id: options[:team_id]
+  )
+end
+
+private_lane :addShield do |options|
+  buildNumber = options[:buildNumber]
+  buildDescription = options[:xcconfig_name] # EnterpriseCustomerDev1WithoutSSLPinningRelease
+    .split(/(?=[A-Z])/) # -> ["Enterprise", "Customer", "Dev1", "Without", "S", "S", "L", "Pinning", "Release"]
+    .map { |v| v.gsub(/[[:lower:]]+/, "") }[1..2] # -> ["E", "C", "D1", "W", "S", "S", "L", "P", "R"] -> ["C", "D1"]
+    .join # -> "CD1"
+
+  begin
+    add_badge(
+      shield: "#{buildDescription}-#{buildNumber}-green",
+      no_badge: true
+    )
+  rescue => error
+    UI.error(error)
+  end
+end
+
+private_lane :buildConfiguration do |options|
+  appName = options[:appName] || $appName
+
+  lane_name = lane_context[SharedValues::LANE_NAME]
+
+  options[:scheme] = appName
+  options[:xcconfig_name] = lane_name
+
+  configuration_type = Touchlane::ConfigurationType.from_lane_name(lane_name)
+  options = fill_up_options_using_configuration_type(options, configuration_type)
+
+  openKeychain(options)
+
+  if is_ci
+    increment_build_number(
+      build_number: options[:buildNumber]
+    )
+  end
+
+  ipa_name = "#{appName}.ipa"
+  options[:output_name] = ipa_name
+
+  options[:ipa_path] = "./#{ipa_name}"
+  options[:dsym_path] = "./#{appName}.app.dSYM.zip"
+
+  options[:xcodeproj_path] = "../#{appName}.xcodeproj"
+  options[:workspace] = "./#{appName}.xcworkspace"
+
+  installDependencies(options)
+
+  if !(options[:uploadToFabric] || options[:uploadToAppStore])
+    options[:skip_package_ipa] = true
+
+    sync_code_signing_using_options(options)
+
+    buildArchive(options) # check build failures and static analysis
+  end
+
+  if options[:uploadToFabric]
+    sync_code_signing_using_options(options)
+    addShield(options)
+    buildArchive(options)
+
+    uploadToFirebase(options)
+  end
+
+  if options[:uploadToAppStore]
+    options[:compileBitcode] = options[:compileBitcode].nil? ? true : options[:compileBitcode]
+    options[:include_symbols] = options[:include_symbols].nil? ? true : options[:include_symbols]
+
+    sync_code_signing_using_options(options)
+
+    buildArchive(options)
+    uploadToAppStore(options)
+  end
+end
+
+private_lane :buildArchive do |options|
+  icloudEnvironment = options[:iCloudContainerEnvironment] || ""
+  exportOptions = icloudEnvironment.to_s.empty? ? {} : {iCloudContainerEnvironment: icloudEnvironment}
+  exportOptions[:compileBitcode] = options[:compileBitcode] || false
+
+  xcconfig_name = options[:xcconfig_name]
+  configuration = options[:configuration]
+  xcodeproj_path = options[:xcodeproj_path]
+
+  if configuration != "AppStore" # AppStore uses xcconfig choosen in Xcode
+    set_xcconfig_for_configuration_of_project(xcconfig_name, configuration, xcodeproj_path)
+  end
+
+  gym(
+    clean: true,
+    workspace: options[:workspace],
+    scheme: options[:scheme],
+    archive_path: "./",
+    output_directory: "./",
+    output_name: options[:output_name],
+    configuration: configuration,
+    export_method: options[:export_method],
+    export_options: exportOptions,
+    skip_package_ipa: options[:skip_package_ipa],
+    include_symbols: options[:include_symbols] || false,
+    include_bitcode: options[:compileBitcode] || false,
+  )
+end
+
+lane :CreatePushCertificate do |options|
+  configuration = get_configuration_for_type(options[:type] || "development")
+  options = configuration.to_options.merge(options)
+
+  certificates_path = File.expand_path "../Certificates"
+  Dir.mkdir(certificates_path) unless File.directory?(certificates_path)
+
+  app_identifier = options[:app_identifier]
+
+  get_push_certificate(
+    development: options[:development].nil? ? true : options[:development],
+    generate_p12: true,
+    active_days_limit: 30, # create new certificate if old one will expire in 30 days
+    save_private_key: false,
+    app_identifier: (app_identifier.is_a? Array) ? app_identifier.first : app_identifier,
+    username: options[:username] || options[:apple_id],
+    team_id: options[:team_id],
+    p12_password: "123", # empty password won't work with Pusher
+    output_path: certificates_path
+  )
+end
+
+lane :SyncCodeSigning do |options|
+  configuration_type = Touchlane::ConfigurationType.from_type(options[:type])
+  options = fill_up_options_using_configuration_type(options, configuration_type)
+
+  sync_code_signing_using_options(options)
+end
+
+lane :SyncSymbols do |options|
+  configuration = get_configuration_for_type(options[:type])
+  options = configuration.to_options.merge(options)
+
+  appName = options[:appName] || $appName
+
+  xcodeproj_path = File.expand_path "../#{appName}.xcodeproj"
+
+  version_number = options[:version] || get_version_number(xcodeproj: xcodeproj_path, target: appName)
+  build_number = options[:build_number] || get_build_number(xcodeproj: xcodeproj_path)
+
+  if configuration.type.is_app_store
+    download_dsyms(
+      username: options[:username],
+      app_identifier: options[:app_identifier].first,
+      team_id: options[:itc_team_id],
+      version: version_number,
+      build_number: build_number
+    )
+  end
+
+  app_target_folder_name = appName
+
+  upload_symbols_to_crashlytics(
+    gsp_path: get_google_services_plist_path(app_target_folder_name, configuration.type)
+  )
+
+  clean_build_artifacts
+end
+
+private_lane :openKeychain do |options|
+  if is_ci?
+    # workaround to avoid duplication problem
+    # https://apple.stackexchange.com/questions/350633/multiple-duplicate-keychain-dbs-that-dont-get-cleaned-up
+    keychain_path = File.expand_path("~/Library/Keychains/#{options[:keychain_name]}")
+    keychain_exists = File.exist?("#{keychain_path}-db") || File.exist?(keychain_path)
+
+    create_keychain(
+      name: options[:keychain_name],
+      password: options[:keychain_password],
+      unlock: true,
+      timeout: false,
+      add_to_search_list: !keychain_exists
+    )
+  else
+    unlock_keychain(
+      path: options[:keychain_name],
+      password: options[:keychain_password]
+    )
+  end
+end
+
+lane :ManuallyUpdateCodeSigning do |options|
+  # based on this article https://medium.com/@jonathancardoso/using-fastlane-match-with-existing-certificates-without-revoking-them-a325be69dac6
+  require 'fastlane_core'
+  require 'match'
+
+  conf = FastlaneCore::Configuration.create(Match::Options.available_options, {})
+  conf.load_configuration_file("Matchfile")
+
+  git_url = conf.config_file_options[:git_url]
+  shallow_clone = false
+  branch = 'fastlane_certificates'
+
+  storage_conf = lambda do
+    new_storage = Match::Storage.for_mode('git', { git_url: git_url, shallow_clone: shallow_clone, git_branch: branch, clone_branch_directly: false})
+    new_storage.download
+    return new_storage
+  end
+
+  encryption_conf_for_storage = lambda do |stor|
+    new_encryption = Match::Encryption.for_storage_mode('git', { git_url: git_url, working_directory: stor.working_directory})
+    new_encryption.decrypt_files
+    return new_encryption
+  end
+
+  get_all_files = lambda do |stor|
+    Dir[File.join(stor.working_directory, "**", "*.{cer,p12,mobileprovision}")]
+  end
+
+  storage = storage_conf.call
+  encryption = encryption_conf_for_storage.call(storage)
+  old_files = get_all_files.call(storage)
+
+  sh("open #{storage.working_directory}")
+
+  # we are not using prompt() since it requires non-empty input which is not a case for Enter (\n)
+  puts "Enter any key when you're done"
+  STDIN.gets
+
+  encryption.encrypt_files
+
+  files_to_commit = get_all_files.call(storage)
+  old_directory = storage.working_directory
+  storage.save_changes!(files_to_commit: files_to_commit)
+
+
+  # need to check, because saving changes with delete is another function (update repo if needed)
+  files_diff = old_files - files_to_commit
+
+  # match can not work with both save/delete functionality `You can't provide both files_to_delete and files_to_commit right now`
+  # to avoid this we use storage twice if needed
+
+  if files_diff.length > 0
+    storage = storage_conf.call
+    encryption = encryption_conf_for_storage.call(storage)
+
+    files_to_delete = files_diff.map do |file|
+      old_file = file
+      old_file.slice! old_directory
+      new_file = File.join(storage.working_directory, old_file)
+      File.delete(new_file) if File.exist?(new_file)
+      file = new_file
+    end
+
+    encryption.encrypt_files
+    storage.save_changes!(files_to_delete: files_to_delete)
+  end
+
+end
+
+def sync_code_signing_using_options(options)
+  match(
+    app_identifier: options[:app_identifier],
+    username: options[:username] || options[:apple_id],
+    team_id: options[:team_id],
+    type: options[:type],
+    readonly: options[:readonly].nil? ? true : options[:readonly],
+    storage_mode: "git",
+    git_url: options[:git_url],
+    git_branch: "fastlane_certificates",
+    shallow_clone: true,
+    clone_branch_directly: true,
+    keychain_name: options[:keychain_name],
+    keychain_password: options[:keychain_password],
+    skip_docs: true,
+    platform: "ios"
+  )
+end
+
+def fill_up_options_using_configuration_type(options, configuration_type)
+  configuration = get_configuration_for_type(configuration_type.type)
+
+  configuration.to_options
+    .merge(get_keychain_options(options))
+    .merge(options)
+end
+
+def get_keychain_options(options)
+  keychain_name = options[:keychain_name]
+  keychain_password = options[:keychain_password]
+
+  if is_ci?
+    keychain_name = keychain_name || "ci.keychain"
+    keychain_password = keychain_password ||  ""
+  else
+    keychain_password = keychain_password || prompt(
+      text: "Please enter your keychain password (account password): ",
+      secure_text: true
+    )
+  end
+
+  return {:keychain_name => keychain_name, :keychain_password => keychain_password}
+end
+
+def get_configuration_for_type(type)
+  config_path = File.expand_path "configurations.yaml"
+
+  configuration = Touchlane::Configuration.from_file(config_path, type)
+end
+
+def get_google_services_plist_path(app_target_folder_name, configuration_type)
+  File.expand_path "../#{app_target_folder_name}/Resources/#{configuration_type.prefix}-GoogleService-Info.plist"
+end
+
+def set_xcconfig_for_configuration_of_project(xcconfig_name, configuration, xcodeproj_path)
+  require 'xcodeproj'
+
+  project = Xcodeproj::Project.open(xcodeproj_path)
+
+  target_to_modify_selector = lambda do |t|
+    supported_product_types = [
+        Xcodeproj::Constants::PRODUCT_TYPE_UTI[:application],
+        Xcodeproj::Constants::PRODUCT_TYPE_UTI[:app_extension]
+    ]
+    return !t.test_target_type? && supported_product_types.include?(t.product_type)
+  end
+
+  application_targets = project.native_targets.select(&target_to_modify_selector)
+
+  application_targets.each do |target|
+    build_configuration = target.build_configuration_list[configuration]
+    config_name = target.name + xcconfig_name
+    build_configuration_reference = project.files.select { |f| f.path.start_with?(config_name) }.first
+    build_configuration.base_configuration_reference = build_configuration_reference
+  end
+
+
+  project.save()
+end

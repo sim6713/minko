@@ -1,0 +1,31 @@
+buildscript {
+    repositories {
+        google()
+        jcenter()
+        maven { url "https://plugins.gradle.org/m2/" }
+    }
+    dependencies {
+        classpath 'com.android.tools.build:gradle:4.0.0'
+        classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlin_version"
+        classpath 'de.aaschmid:gradle-cpd-plugin:3.1'
+        classpath "io.gitlab.arturbosch.detekt:detekt-gradle-plugin:1.6.0"
+    }
+}
+
+allprojects {
+    repositories {
+        google()
+        jcenter()
+        maven {
+            url "https://dl.bintray.com/touchin/touchin-tools"
+            metadataSources {
+                artifact()
+            }
+
+        }
+    }
+}
+
+task clean(type: Delete) {
+    delete rootProject.buildDir
+}
